@@ -13,23 +13,26 @@
 struct ButtonHandler
 {
   // Минимальное время нажатия кнопки в миллисекундах.
-  const int pressInterval = 1000;
+  const int pressShortInterval = 1000;
+  const int pressLongInterval = 2000;
 
-  bool isPressed;  
+  bool isPressed; 
   int pressMillis;
   int pin;
-  void (*callback)(void);
+  void (*shortCallback)(void);
+  void (*longCallback)(void);
 
-  ButtonHandler(int pin_, void (*callback_)(void)):
+  ButtonHandler(int pin_, void (*shortCallback_)(void), void (*longCallback_)(void)):
     pin(pin_),
-    callback(callback_),
+    shortCallback(shortCallback_),
+    longCallback(longCallback_),
     pressMillis(0),
     isPressed(false)
   {
   }
 
   // Возвращает истину, если нажатие кнопки сработало.
-  bool loop()
+  void loop()
   {
     if (digitalRead(pin) == HIGH)
     {
@@ -39,31 +42,48 @@ struct ButtonHandler
         isPressed = true;
       }
       
-      return false;
+      return;
     }
        
     if (!isPressed)
-      return false;
+      return;
 
     isPressed = false;
-
-    if (millis() - pressMillis < pressInterval)
-      return false;
-
-    callback();
     
-    return true;
+    int interval = millis() - pressMillis;
+    
+    if (interval < pressShortInterval)
+      return;
+
+//    if (constrain(interval, pressShortInterval, pressLongInterval))
+//      shortCallback();
+
+    if (interval > pressLongInterval)
+    {
+      longCallback();
+      return;
+    }
+
+    if (interval > pressShortInterval)
+    {
+      shortCallback();
+      return;
+    }
   }
 };
 
 /* Класс для отображения текущего состояния реле (либо работает, либо сколько времени не работает). */
 class RelayTimer
-{
+{    
+  const unsigned long SLEEPING_MILLIS = 3600000;
+  
   private:
     int pin;
     unsigned long startMillis;
+    unsigned long startSleepingMillis;
     bool isWorking;
-
+    bool isSleeping;
+    
     String leadingZeroes(unsigned long number, int cols = 2)
     {
       String result(number);
@@ -78,10 +98,27 @@ class RelayTimer
     RelayTimer(int pin_):
       pin(pin_),
       startMillis(0),
-      isWorking(false)
+      startSleepingMillis(0),
+      isWorking(false),
+      isSleeping(false)
     {
       pinMode(pin, OUTPUT);
       digitalWrite(pin, RELAY_OFF);
+    }
+
+    bool getSleeping()
+    {
+      return isSleeping;
+    }
+
+    void setSleeping(bool value)
+    {
+      if (!isSleeping && value)
+      {
+        startSleepingMillis = millis();
+      }
+      
+      isSleeping = value;
     }
 
     // Метод, который вызывается из глобальной функции loop().
@@ -93,11 +130,17 @@ class RelayTimer
         startMillis = (millis() / 1000) * 1000;
 
       isWorking = currentWorking;
+
+      if (isSleeping && (startSleepingMillis + SLEEPING_MILLIS < millis()))
+        isSleeping = false;
     }
 
     // Метод для формирования строки со статусом реле.
     String show()
     {
+      if (isSleeping)
+        return "SLEEPING";
+        
       if (isWorking)
         return "WORKING ";
  
@@ -133,18 +176,48 @@ LiquidCrystal lcd(6, 7, 8, 9, 10, 11);
 /* Датчик температуры - 12 пин */
 OneWire oneWire(12);
 DallasTemperature sensor(&oneWire);
-
-/* Кнопки установки температуры:
- *  Кнопка вверх, 2 пин, 0 прерывание;
- *  Кнопка вниз, 3 пин, 1 прерывание.
- */
-ButtonHandler buttons[2] = { ButtonHandler(2, buttonUpClick), ButtonHandler(3, buttonDownClick) };
- 
 /* Пины реле охлаждения и обогревателя соответственно. */
 int relayPins[2] = { 4, 5 };
 
 RelayTimer timers[2] = { RelayTimer(relayPins[0]), RelayTimer(relayPins[1]) };
 
+
+void toggleSleeping(int index)
+{
+  bool value = timers[index].getSleeping();
+  
+  timers[index].setSleeping(!value);
+}
+
+void buttonUpLong()
+{
+  toggleSleeping(0);
+}
+
+void buttonDownLong()
+{
+  toggleSleeping(1);
+}
+
+void buttonUpShort()
+{
+  changeTargetTemperature(true);
+}
+
+void buttonDownShort()
+{
+  changeTargetTemperature(false);
+}
+
+/* Кнопки установки температуры:
+ *  Кнопка вверх, 2 пин, 0 прерывание;
+ *  Кнопка вниз, 3 пин, 1 прерывание.
+ */
+ButtonHandler buttons[2] = {
+  ButtonHandler(2, buttonUpShort, buttonUpLong), 
+  ButtonHandler(3, buttonDownShort, buttonDownLong) 
+};
+ 
 int targetTemperature;
 int targetTemperatureRange[2] = { 20, 30 };
 
@@ -302,6 +375,13 @@ void loop()
     }
   }
 
+  if (timers[0].getSleeping())
+    isFan = RELAY_OFF;// &= !timers[0].getSleeping();
+
+  if (timers[1].getSleeping())
+    isHeater = RELAY_OFF;
+  //isHeater &= !timers[1].getSleeping();
+  
   digitalWrite(relayPins[0], (int)isFan);
   digitalWrite(relayPins[1], (int)isHeater);  
 }
@@ -314,14 +394,4 @@ void changeTargetTemperature(bool isChangeToUp)
 #ifndef DISABLE_EEPROM_IO
   EEPROM.write(targetTemperatureCell, (uint8_t)targetTemperature);
 #endif  
-}
-
-void buttonUpClick()
-{
-  changeTargetTemperature(true);
-}
-
-void buttonDownClick()
-{
-  changeTargetTemperature(false);
 }
